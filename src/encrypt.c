@@ -233,18 +233,6 @@ static const int supported_ciphers_key_size[CIPHER_NUM] = {
     0, 16, 16, 16, 24, 32, 16, 24, 32, 16, 16, 24, 32, 16, 8, 16, 16, 16, 32, 32, 32
 };
 
-static int
-safe_memcmp(const void *s1, const void *s2, size_t n)
-{
-    const unsigned char *_s1 = (const unsigned char *)s1;
-    const unsigned char *_s2 = (const unsigned char *)s2;
-    int ret                  = 0;
-    size_t i;
-    for (i = 0; i < n; i++)
-        ret |= _s1[i] ^ _s2[i];
-    return !!ret;
-}
-
 int
 balloc(buffer_t *ptr, size_t capacity)
 {
@@ -916,54 +904,7 @@ cipher_context_update(cipher_ctx_t *ctx, uint8_t *output, size_t *olen,
 }
 
 int
-ss_onetimeauth(buffer_t *buf, uint8_t *iv, size_t capacity)
-{
-    uint8_t hash[ONETIMEAUTH_BYTES * 2];
-    uint8_t auth_key[MAX_IV_LENGTH + MAX_KEY_LENGTH];
-    memcpy(auth_key, iv, enc_iv_len);
-    memcpy(auth_key + enc_iv_len, enc_key, enc_key_len);
-
-    brealloc(buf, ONETIMEAUTH_BYTES + buf->len, capacity);
-
-#if defined(USE_CRYPTO_OPENSSL)
-    HMAC(EVP_sha1(), auth_key, enc_iv_len + enc_key_len, (uint8_t *)buf->data, buf->len, (uint8_t *)hash, NULL);
-#elif defined(USE_CRYPTO_MBEDTLS)
-    mbedtls_md_hmac(mbedtls_md_info_from_type(
-                        MBEDTLS_MD_SHA1), auth_key, enc_iv_len + enc_key_len, (uint8_t *)buf->data, buf->len,
-                    (uint8_t *)hash);
-#else
-    sha1_hmac(auth_key, enc_iv_len + enc_key_len, (uint8_t *)buf->data, buf->len, (uint8_t *)hash);
-#endif
-
-    memcpy(buf->data + buf->len, hash, ONETIMEAUTH_BYTES);
-    buf->len += ONETIMEAUTH_BYTES;
-
-    return 0;
-}
-
-int
-ss_onetimeauth_verify(buffer_t *buf, uint8_t *iv)
-{
-    uint8_t hash[ONETIMEAUTH_BYTES * 2];
-    uint8_t auth_key[MAX_IV_LENGTH + MAX_KEY_LENGTH];
-    memcpy(auth_key, iv, enc_iv_len);
-    memcpy(auth_key + enc_iv_len, enc_key, enc_key_len);
-    size_t len = buf->len - ONETIMEAUTH_BYTES;
-
-#if defined(USE_CRYPTO_OPENSSL)
-    HMAC(EVP_sha1(), auth_key, enc_iv_len + enc_key_len, (uint8_t *)buf->data, len, hash, NULL);
-#elif defined(USE_CRYPTO_MBEDTLS)
-    mbedtls_md_hmac(mbedtls_md_info_from_type(
-                        MBEDTLS_MD_SHA1), auth_key, enc_iv_len + enc_key_len, (uint8_t *)buf->data, len, hash);
-#else
-    sha1_hmac(auth_key, enc_iv_len + enc_key_len, (uint8_t *)buf->data, len, hash);
-#endif
-
-    return safe_memcmp(buf->data + len, hash, ONETIMEAUTH_BYTES);
-}
-
-int
-ss_encrypt_all(buffer_t *plain, int method, int auth, size_t capacity)
+ss_encrypt_all(buffer_t *plain, int method, size_t capacity)
 {
     if (method > TABLE) {
         cipher_ctx_t evp;
@@ -982,11 +923,6 @@ ss_encrypt_all(buffer_t *plain, int method, int auth, size_t capacity)
         rand_bytes(iv, iv_len);
         cipher_context_set_iv(&evp, iv, iv_len, 1);
         memcpy(cipher->data, iv, iv_len);
-
-        if (auth) {
-            ss_onetimeauth(plain, iv, capacity);
-            cipher->len = plain->len;
-        }
 
         if (method >= SALSA20) {
             crypto_stream_xor_ic((uint8_t *)(cipher->data + iv_len),
@@ -1103,7 +1039,7 @@ ss_encrypt(buffer_t *plain, enc_ctx_t *ctx, size_t capacity)
 }
 
 int
-ss_decrypt_all(buffer_t *cipher, int method, int auth, size_t capacity)
+ss_decrypt_all(buffer_t *cipher, int method, size_t capacity)
 {
     if (method > TABLE) {
         size_t iv_len = enc_iv_len;
@@ -1134,17 +1070,6 @@ ss_decrypt_all(buffer_t *cipher, int method, int auth, size_t capacity)
             ret = cipher_context_update(&evp, (uint8_t *)plain->data, &plain->len,
                                         (const uint8_t *)(cipher->data + iv_len),
                                         cipher->len - iv_len);
-        }
-
-        if (auth || (plain->data[0] & ONETIMEAUTH_FLAG)) {
-            if (plain->len > ONETIMEAUTH_BYTES) {
-                ret = !ss_onetimeauth_verify(plain, iv);
-                if (ret) {
-                    plain->len -= ONETIMEAUTH_BYTES;
-                }
-            } else {
-                ret = 0;
-            }
         }
 
         if (!ret) {
@@ -1386,92 +1311,3 @@ enc_init(const char *pass, const char *method)
     return m;
 }
 
-int
-ss_check_hash(buffer_t *buf, chunk_t *chunk, enc_ctx_t *ctx, size_t capacity)
-{
-    int i, j, k;
-    ssize_t blen  = buf->len;
-    uint32_t cidx = chunk->idx;
-
-    brealloc(chunk->buf, chunk->len + blen, capacity);
-    brealloc(buf, chunk->len + blen, capacity);
-
-    for (i = 0, j = 0, k = 0; i < blen; i++) {
-        chunk->buf->data[cidx++] = buf->data[k++];
-
-        if (cidx == CLEN_BYTES) {
-            uint16_t clen = ntohs(*((uint16_t *)chunk->buf->data));
-            brealloc(chunk->buf, clen + AUTH_BYTES, capacity);
-            chunk->len = clen;
-        }
-
-        if (cidx == chunk->len + AUTH_BYTES) {
-            // Compare hash
-            uint8_t hash[ONETIMEAUTH_BYTES * 2];
-            uint8_t key[MAX_IV_LENGTH + sizeof(uint32_t)];
-
-            uint32_t c = htonl(chunk->counter);
-            memcpy(key, ctx->evp.iv, enc_iv_len);
-            memcpy(key + enc_iv_len, &c, sizeof(uint32_t));
-#if defined(USE_CRYPTO_OPENSSL)
-            HMAC(EVP_sha1(), key, enc_iv_len + sizeof(uint32_t),
-                 (uint8_t *)chunk->buf->data + AUTH_BYTES, chunk->len, hash, NULL);
-#elif defined(USE_CRYPTO_MBEDTLS)
-            mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA1), key, enc_iv_len + sizeof(uint32_t),
-                            (uint8_t *)chunk->buf->data + AUTH_BYTES, chunk->len, hash);
-#else
-            sha1_hmac(key, enc_iv_len + sizeof(uint32_t),
-                      (uint8_t *)chunk->buf->data + AUTH_BYTES, chunk->len, hash);
-#endif
-
-            if (safe_memcmp(hash, chunk->buf->data + CLEN_BYTES, ONETIMEAUTH_BYTES) != 0) {
-                return 0;
-            }
-
-            // Copy chunk back to buffer
-            memmove(buf->data + j + chunk->len, buf->data + k, blen - i - 1);
-            memcpy(buf->data + j, chunk->buf->data + AUTH_BYTES, chunk->len);
-
-            // Reset the base offset
-            j   += chunk->len;
-            k    = j;
-            cidx = 0;
-            chunk->counter++;
-        }
-    }
-
-    buf->len   = j;
-    chunk->idx = cidx;
-    return 1;
-}
-
-int
-ss_gen_hash(buffer_t *buf, uint32_t *counter, enc_ctx_t *ctx, size_t capacity)
-{
-    ssize_t blen       = buf->len;
-    uint16_t chunk_len = htons((uint16_t)blen);
-    uint8_t hash[ONETIMEAUTH_BYTES * 2];
-    uint8_t key[MAX_IV_LENGTH + sizeof(uint32_t)];
-    uint32_t c = htonl(*counter);
-
-    brealloc(buf, AUTH_BYTES + blen, capacity);
-    memcpy(key, ctx->evp.iv, enc_iv_len);
-    memcpy(key + enc_iv_len, &c, sizeof(uint32_t));
-#if defined(USE_CRYPTO_OPENSSL)
-    HMAC(EVP_sha1(), key, enc_iv_len + sizeof(uint32_t), (uint8_t *)buf->data, blen, hash, NULL);
-#elif defined(USE_CRYPTO_MBEDTLS)
-    mbedtls_md_hmac(mbedtls_md_info_from_type(
-                        MBEDTLS_MD_SHA1), key, enc_iv_len + sizeof(uint32_t), (uint8_t *)buf->data, blen, hash);
-#else
-    sha1_hmac(key, enc_iv_len + sizeof(uint32_t), (uint8_t *)buf->data, blen, hash);
-#endif
-
-    memmove(buf->data + AUTH_BYTES, buf->data, blen);
-    memcpy(buf->data + CLEN_BYTES, hash, ONETIMEAUTH_BYTES);
-    memcpy(buf->data, &chunk_len, CLEN_BYTES);
-
-    *counter = *counter + 1;
-    buf->len = blen + AUTH_BYTES;
-
-    return 0;
-}

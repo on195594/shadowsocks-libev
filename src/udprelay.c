@@ -681,7 +681,7 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
     buf->len = r;
 
 #ifdef MODULE_LOCAL
-    int err = ss_decrypt_all(buf, server_ctx->method, 0, buf_size);
+    int err = ss_decrypt_all(buf, server_ctx->method, buf_size);
     if (err) {
         // drop the packet silently
         goto CLEAN_UP;
@@ -744,7 +744,7 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
     memcpy(buf->data, addr_header, addr_header_len);
     buf->len += addr_header_len;
 
-    int err = ss_encrypt_all(buf, server_ctx->method, 0, buf_size);
+    int err = ss_encrypt_all(buf, server_ctx->method, buf_size);
     if (err) {
         // drop the packet silently
         goto CLEAN_UP;
@@ -891,7 +891,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
 #ifdef MODULE_REMOTE
     tx += buf->len;
 
-    int err = ss_decrypt_all(buf, server_ctx->method, server_ctx->auth, buf_size);
+    int err = ss_decrypt_all(buf, server_ctx->method, buf_size);
     if (err) {
         // drop the packet silently
         goto CLEAN_UP;
@@ -1156,11 +1156,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         memmove(buf->data, buf->data + offset, buf->len);
     }
 
-    if (server_ctx->auth) {
-        buf->data[0] |= ONETIMEAUTH_FLAG;
-    }
-
-    int err = ss_encrypt_all(buf, server_ctx->method, server_ctx->auth, buf_size);
+    int err = ss_encrypt_all(buf, server_ctx->method, buf_size);
 
     if (err) {
         // drop the packet silently
@@ -1310,7 +1306,7 @@ init_udprelay(const char *server_host, const char *server_port,
               const ss_addr_t tunnel_addr,
 #endif
 #endif
-              int mtu, int method, int auth, int timeout, const char *iface)
+              int mtu, int method, int timeout, const char *iface)
 {
     // Initialize ev loop
     struct ev_loop *loop = EV_DEFAULT;
@@ -1339,7 +1335,6 @@ init_udprelay(const char *server_host, const char *server_port,
 #ifdef MODULE_REMOTE
     server_ctx->loop = loop;
 #endif
-    server_ctx->auth       = auth;
     server_ctx->timeout    = max(timeout, MIN_UDP_TIMEOUT);
     server_ctx->method     = method;
     server_ctx->iface      = iface;

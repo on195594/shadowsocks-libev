@@ -91,7 +91,6 @@ int keep_resolving = 1;
 
 static int ipv6first = 0;
 static int mode      = TCP_ONLY;
-static int auth      = 0;
 #ifdef HAVE_SETRLIMIT
 static int nofile    = 0;
 #endif
@@ -228,10 +227,6 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         }
 
         LOGI("redir to %s:%d, len=%zu, recv=%zd", ipstr, port, remote->buf->len, r);
-    }
-
-    if (auth) {
-        ss_gen_hash(remote->buf, &remote->counter, server->e_ctx, BUF_SIZE);
     }
 
     if (!remote->send_ctx->connected) {
@@ -476,11 +471,6 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
             }
 
             abuf->len += 2;
-
-            if (auth) {
-                abuf->data[0] |= ONETIMEAUTH_FLAG;
-                ss_onetimeauth(abuf, server->e_ctx->evp.iv, BUF_SIZE);
-            }
 
             brealloc(remote->buf, remote->buf->len + abuf->len, BUF_SIZE);
             memmove(remote->buf->data + abuf->len, remote->buf->data, remote->buf->len);
@@ -817,7 +807,7 @@ main(int argc, char **argv)
 
     USE_TTY();
 
-    while ((c = getopt_long(argc, argv, "f:s:p:l:k:t:m:c:b:a:n:huUvA6",
+    while ((c = getopt_long(argc, argv, "f:s:p:l:k:t:m:c:b:a:n:huUv6",
                             long_options, &option_index)) != -1) {
         switch (c) {
         case 0:
@@ -887,9 +877,6 @@ main(int argc, char **argv)
         case 'h':
             usage();
             exit(EXIT_SUCCESS);
-        case 'A':
-            auth = 1;
-            break;
         case '6':
             ipv6first = 1;
             break;
@@ -945,9 +932,6 @@ main(int argc, char **argv)
         }
         if (plugin_opts == NULL) {
             plugin_opts = conf->plugin_opts;
-        }
-        if (auth == 0) {
-            auth = conf->auth;
         }
         if (mtu == 0) {
             mtu = conf->mtu;
@@ -1012,10 +996,6 @@ main(int argc, char **argv)
 
     if (ipv6first) {
         LOGI("resolving hostname to IPv6 address first");
-    }
-
-    if (auth) {
-        LOGI("onetime authentication enabled");
     }
 
     if (plugin != NULL) {
@@ -1108,7 +1088,7 @@ main(int argc, char **argv)
         }
         struct sockaddr *addr = (struct sockaddr *)storage;
         init_udprelay(local_addr, local_port, addr,
-                      get_sockaddr_len(addr), mtu, m, auth, listen_ctx.timeout, NULL);
+                      get_sockaddr_len(addr), mtu, m, listen_ctx.timeout, NULL);
     }
 
     if (mode == UDP_ONLY) {
